@@ -1,0 +1,8 @@
+@'
+.env
+logs/*
+!logs/.gitkeep
+config/airflow.cfg
+__pycache__/
+*.py[cod]
+'@ | Set-Content -Path .gitignore
