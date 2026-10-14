@@ -17,6 +17,8 @@ from typing import Any, cast
 
 from contextlib import closing
 
+from notification_client import notify_daily_metrics_generated
+
 logger = logging.getLogger(__name__)
 
 TIMEZONE = "Europe/Paris"
@@ -217,13 +219,22 @@ def fraud_detection_daily_analytics():
         }
 
     @task
-    def notify_report(report: dict) -> None:
+    def notify_report(report: dict[str, Any], metrics: dict[str, Any]) -> bool:
         """Publish the daily report to Airflow logs."""
         logger.info(
             "Daily fraud report ready: %s\n%s",
             report["path"],
             report["content"],
         )
+        notification_sent = notify_daily_metrics_generated(
+            metrics)
+
+        if notification_sent:
+            logger.info("Daily report notification sent to Discord.")
+        else:
+            logger.warning("Failed to send daily report notification to Discord.")
+
+        return notification_sent
 
     # ---------------------------------------------------------
     # Task groups
@@ -244,9 +255,7 @@ def fraud_detection_daily_analytics():
         report = generate_report(
             cast(dict[str, Any], persisted_metrics)
         )
-        notify_report(
-            cast(dict[str, Any], report)
-        )
+        notify_report(report,calculated_metrics)
 
 
 fraud_detection_daily_analytics()
