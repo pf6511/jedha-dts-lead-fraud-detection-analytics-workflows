@@ -10,7 +10,7 @@ from airflow.sdk import (
     TaskGroup,
     dag,
     get_current_context,
-    task,
+    task
 )
 
 from typing import Any, cast
@@ -18,6 +18,8 @@ from typing import Any, cast
 from contextlib import closing
 
 from notification_client import notify_daily_metrics_generated
+
+from airflow.sdk.exceptions import AirflowSkipException
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +176,13 @@ def fraud_detection_daily_analytics():
             "predicted_fraud_amount": str(row[7]),
             "generated_at": row[8].isoformat(),
             "airflow_run_id": row[9],
+            # 'created' | 'updated' | 'unchanged' (see upsert SQL)
+            "persistence_status": row[10],
         }
 
         logger.info(
             "Persisted daily metrics: %s",
+            persisted_metrics["persistence_status"],
             persisted_metrics,
         )
 
@@ -195,19 +200,25 @@ def fraud_detection_daily_analytics():
         rate = metrics["predicted_fraud_rate_percent"]
         rate_text = f"{rate:.2f}%" if rate is not None else "N/A"
 
-        report_content = f"""# Daily Fraud Detection Report
-
-        - **Period start:** {metrics["period_start"]}
-        - **Period end (exclusive):** {metrics["period_end"]}
-
-        ## Transaction metrics
-
-        - Transactions received: {metrics["transaction_count"]}
-        - Transactions evaluated: {metrics["evaluated_transaction_count"]}
-        - Transactions flagged as fraud: {metrics["predicted_fraud_count"]}
-        - Fraud prediction rate among evaluated transactions: {rate_text}
-        - Amount associated with flagged transactions: {metrics["predicted_fraud_amount"]}
-        """
+        report_content = "\n".join(
+            [
+                "# Daily Fraud Detection Report",
+                "",
+                f"- **Report date:** {report_date}",
+                f"- **Period start:** {metrics['period_start']}",
+                f"- **Period end (exclusive):** {metrics['period_end']}",
+                f"- **Generated at:** {metrics['generated_at']}",
+                "",
+                "## Transaction metrics",
+                "",
+                f"- Transactions received: {metrics['transaction_count']}",
+                f"- Transactions evaluated: {metrics['evaluated_transaction_count']}",
+                f"- Transactions flagged as fraud: {metrics['predicted_fraud_count']}",
+                f"- Fraud prediction rate among evaluated transactions: {rate_text}",
+                f"- Amount associated with flagged transactions: {metrics['predicted_fraud_amount']}",
+                "",
+            ]
+        )
 
         report_path.write_text(report_content, encoding="utf-8")
 
@@ -221,6 +232,13 @@ def fraud_detection_daily_analytics():
     @task
     def notify_report(report: dict[str, Any], metrics: dict[str, Any]) -> bool:
         """Publish the daily report to Airflow logs."""
+        status = metrics["persistence_status"]
+
+        if status == "unchanged":
+            raise AirflowSkipException(
+                f"Metrics for {metrics['report_date']} unchanged since the "
+                "previous run: no new notification sent."
+            )
         logger.info(
             "Daily fraud report ready: %s\n%s",
             report["path"],
@@ -255,7 +273,7 @@ def fraud_detection_daily_analytics():
         report = generate_report(
             cast(dict[str, Any], persisted_metrics)
         )
-        notify_report(report,calculated_metrics)
+        notify_report(report, cast(dict[str, Any], persisted_metrics))
 
 
 fraud_detection_daily_analytics()
