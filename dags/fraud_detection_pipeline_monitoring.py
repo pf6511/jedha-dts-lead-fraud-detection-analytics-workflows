@@ -22,7 +22,11 @@ import pendulum
 from airflow.sdk import dag, task
 from airflow.sdk.exceptions import AirflowSkipException
 
-from monitoring_checks import freshness_result
+from monitoring_checks import (
+    freshness_result,
+    pending_failures_result,
+    quarantine_rate_result,
+)
 from pipeline_alerts_client import notify_pipeline_alerts
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,34 @@ def fraud_detection_pipeline_monitoring():
         logger.info("Freshness check: %s", result)
         return result
 
+    @task
+    def check_quarantine_rate() -> dict[str, Any]:
+        """Share of the payments of the last 24 hours quarantined."""
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+        hook = PostgresHook(postgres_conn_id=CONNECTION_ID)
+        quarantined_count, stored_count = hook.get_first(
+            read_sql("check_quarantine_rate.sql")
+        )
+
+        result = quarantine_rate_result(quarantined_count, stored_count)
+        logger.info("Quarantine rate check: %s", result)
+        return result
+
+    @task
+    def check_pending_failures() -> dict[str, Any]:
+        """Failed payments waiting for a replay."""
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+        hook = PostgresHook(postgres_conn_id=CONNECTION_ID)
+        pending_count, oldest_pending_hours = hook.get_first(
+            read_sql("check_pending_failures.sql")
+        )
+
+        result = pending_failures_result(pending_count, oldest_pending_hours)
+        logger.info("Pending failures check: %s", result)
+        return result
+    
     # ---------------------------------------------------------
     # Results
     # ---------------------------------------------------------
@@ -106,11 +138,17 @@ def fraud_detection_pipeline_monitoring():
         return sent
 
     # ---------------------------------------------------------
-    # Flow: the next checks will be added to this list
+    # Flow: additional checks to be added to the list of check tasks
     # ---------------------------------------------------------
 
     results = record_results(
-        cast(list[dict[str, Any]], [check_freshness()])
+        cast(
+            list[dict[str, Any]], [
+            check_freshness(),
+            check_quarantine_rate(),
+            check_pending_failures()
+            ]
+        )
     )
     notify_alerts(cast(list[dict[str, Any]], results))
 
