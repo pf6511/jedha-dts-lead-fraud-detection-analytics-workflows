@@ -8,6 +8,10 @@ notify_alerts  sends the failed checks to Discord (#pipeline-alerts);
 Connection fraud_postgres_monitoring: role fraud_detection_monitoring,
 which reads the operational tables and writes only the monitoring schema.
 
+
+The reference values of the model checks are read from the MLflow run
+of the production model (load_model_references).
+
 To stop the alerts while the worker is stopped on purpose, pause this
 DAG in the Airflow UI.
 """
@@ -25,8 +29,17 @@ from airflow.sdk.exceptions import AirflowSkipException
 from monitoring_checks import (
     freshness_result,
     pending_failures_result,
+    precision_result,
+    prevalence_result,
     quarantine_rate_result,
+    recall_result,
+    references_unavailable_result,
 )
+
+from model_metrics_references import ModelCounts, ModelReferences
+
+from mlflow_references_client import fetch_model_references
+
 from pipeline_alerts_client import notify_pipeline_alerts
 
 logger = logging.getLogger(__name__)
@@ -39,6 +52,20 @@ CONNECTION_ID = "fraud_postgres_monitoring"
 def read_sql(file_name: str) -> str:
     return (SQL_DIRECTORY / file_name).read_text(encoding="utf-8")
 
+def read_model_counts() -> ModelCounts:
+    """Counts of the last 7 days used by the three model checks."""
+    from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+    hook = PostgresHook(postgres_conn_id=CONNECTION_ID)
+    evaluated, actual_frauds, predicted_frauds, true_positives = hook.get_first(
+        read_sql("check_model_metrics.sql")
+    )
+    return ModelCounts(
+        evaluated_count=evaluated,
+        actual_fraud_count=actual_frauds,
+        predicted_fraud_count=predicted_frauds,
+        true_positive_count=true_positives,
+    )
 
 @dag(
     dag_id="fraud_detection_pipeline_monitoring",
@@ -101,6 +128,69 @@ def fraud_detection_pipeline_monitoring():
         result = pending_failures_result(pending_count, oldest_pending_hours)
         logger.info("Pending failures check: %s", result)
         return result
+
+    # multiple_outputs=False: the task may return None
+    @task(multiple_outputs=False)
+    def load_model_references() -> ModelReferences | None:
+        """Reference values of the production model, read from MLflow.
+
+        Returns None if MLflow cannot be read: the model checks then
+        report an alert, and the other checks still run.
+        """
+        try:
+            references: ModelReferences | None = fetch_model_references()
+        except Exception:
+            logger.exception("Could not read the model references from MLflow")
+            return None
+
+        logger.info("Model references: %s", references)
+        return references
+
+
+    @task
+    def check_recall(references: ModelReferences | None) -> dict[str, Any]:
+        """Share of the real frauds detected over 7 days."""
+        if references is None:
+            return references_unavailable_result("recall_7d")
+
+        counts: ModelCounts = read_model_counts()
+        result = recall_result(
+            counts["true_positive_count"],
+            counts["actual_fraud_count"],
+            reference=references["validation_recall"],
+        )
+        logger.info("Recall check: %s", result)
+        return result
+
+    @task
+    def check_precision(references: ModelReferences | None) -> dict[str, Any]:
+        """Share of the fraud alerts that were real frauds over 7 days."""
+        if references is None:
+            return references_unavailable_result("precision_7d")
+
+        counts: ModelCounts = read_model_counts()
+        result = precision_result(
+            counts["true_positive_count"],
+            counts["predicted_fraud_count"],
+            reference=references["validation_precision"],
+        )
+        logger.info("Precision check: %s", result)
+        return result
+
+    @task
+    def check_fraud_prevalence(references: ModelReferences | None) -> dict[str, Any]:
+        """Share of real frauds over 7 days, compared with training."""
+        if references is None:
+            return references_unavailable_result("prevalence_7d")
+
+        counts: ModelCounts = read_model_counts()
+        result = prevalence_result(
+            counts["actual_fraud_count"],
+            counts["evaluated_count"],
+            reference=references["training_prevalence"],
+        )
+        logger.info("Prevalence check: %s", result)
+        return result
     
     # ---------------------------------------------------------
     # Results
@@ -141,12 +231,17 @@ def fraud_detection_pipeline_monitoring():
     # Flow: additional checks to be added to the list of check tasks
     # ---------------------------------------------------------
 
+    references = cast(ModelReferences | None, load_model_references())
+
     results = record_results(
         cast(
             list[dict[str, Any]], [
             check_freshness(),
             check_quarantine_rate(),
-            check_pending_failures()
+            check_pending_failures(),
+            check_recall(references),
+            check_precision(references),
+            check_fraud_prevalence(references),
             ]
         )
     )

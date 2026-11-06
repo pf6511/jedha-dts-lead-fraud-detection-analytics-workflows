@@ -78,6 +78,11 @@ x-airflow-common:
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     DISCORD_FRAUD_WEBHOOK_URL: ${DISCORD_FRAUD_WEBHOOK_URL}
     DISCORD_PIPELINE_WEBHOOK_URL: ${DISCORD_PIPELINE_WEBHOOK_URL}
+    # mlflow var
+    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+    MLFLOW_TRACKING_TOKEN: ${MLFLOW_TRACKING_TOKEN}
+    MODEL_NAME: ${MODEL_NAME}
+    MODEL_ALIAS: ${MODEL_ALIAS}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
